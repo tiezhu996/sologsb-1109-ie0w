@@ -66,11 +66,11 @@ npm run build    # 类型检查 + 生产构建
 | `/herbs` | 药材台账 | 药材与批次登记，按基原/药用部位筛选，按药材分组汇总 |
 | `/methods` | 炮制方法 | 辅料比例、火力与判断标准维护，辅料折算台与复制派生 |
 | `/batches` | 工序记录台 | 选方法自动带出辅料比例/火候/判断标准，录入火候与得率并判定程度 |
-| `/samples` | 留样台账 | 柜位网格、到期提醒、按日期追加观察记录 |
+| `/samples` | 留样台账 | 柜位网格（一柜一份、占用拦截）、到期提醒、观察记录、到期处置登记（转销毁/延期观察/复检放行） |
 
 ## 数据存储说明
 
 - 全部数据存于浏览器 IndexedDB（Dexie，库名 `gbherbprocess-db`），表：`herbs`、`methods`、`batches`、`samples`、`meta`。
-- `db.version(1)` 建表声明索引；`db.version(2).upgrade(...)` 为 `batches` 增加 `locked` 索引并回填历史数据。升级前可用顶栏「导出备份」导出全量 JSON。
+- `db.version(1)` 建表声明索引；`db.version(2).upgrade(...)` 为 `batches` 增加 `locked` 索引并回填历史数据；`db.version(3).upgrade(...)` 为留样处置登记兜底（老留样缺 `observeLogs` 时补空数组，新字段 `disposals` 可选，老数据按原到期日照常显示）。升级前可用顶栏「导出备份」导出全量 JSON。
 - 首次打开且表为空时写入一批示例台账（`src/utils/seed.ts`），便于直接查看各页面效果。
 - 容器无状态：不使用数据库服务、不挂载命名卷，`docker compose down` 后数据仍留在浏览器中。

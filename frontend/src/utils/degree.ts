@@ -1,6 +1,6 @@
 import type { FireLevel, MethodName, ProcessingMethod } from '../types/processing-method';
 import type { DegreeRule, ProcessDegree } from '../types/process-batch';
-import type { RetainSample, SampleExpiry, SampleExpiryState } from '../types/retain-sample';
+import type { DisposalRecord, RetainSample, SampleExpiry, SampleExpiryState } from '../types/retain-sample';
 
 /** 火力对应的常见温度区间提示（℃） */
 export const FIRE_LEVEL_TEMP: Record<FireLevel, [number, number]> = {
@@ -126,8 +126,27 @@ export function suggestedValues(method: ProcessingMethod): { temp: number; durat
 
 const DAY_MS = 86_400_000;
 
-/** 留样到期日：留样日期 + 留样期（月） */
+/** 最近一次处置登记（无处置记录的老留样返回 undefined） */
+export function lastDisposalOf(sample: RetainSample): DisposalRecord | undefined {
+  const list = sample.disposals;
+  return list && list.length > 0 ? list[list.length - 1] : undefined;
+}
+
+/** 是否已结案（转销毁/复检放行）：撤下到期提醒并释放柜位；延期观察仍在架 */
+export function isSampleClosed(sample: RetainSample): boolean {
+  const last = lastDisposalOf(sample);
+  return last != null && last.method !== '延期观察';
+}
+
+/** 留样到期日：延期观察自延期当天 + 新留样期重算；否则留样日期 + 留样期（月） */
 export function expireDateOf(sample: RetainSample): Date {
+  const last = lastDisposalOf(sample);
+  if (last?.method === '延期观察' && last.extendMonths) {
+    const base = new Date(last.disposedAt);
+    const expire = new Date(base);
+    expire.setMonth(expire.getMonth() + last.extendMonths);
+    return expire;
+  }
   const base = new Date(sample.retainedAt);
   const expire = new Date(base);
   expire.setMonth(expire.getMonth() + sample.retainMonths);
@@ -172,9 +191,9 @@ export function buildExpiryList(samples: RetainSample[], warnDays = 30, now: Dat
     .sort((a, b) => a.daysLeft - b.daysLeft);
 }
 
-/** 到期（含 30 天内临期）清单 */
+/** 到期（含 30 天内临期）提醒清单：已结案（转销毁/复检放行）的留样撤下不再提醒 */
 export function dueSamples(samples: RetainSample[], warnDays = 30, now: Date = new Date()): SampleExpiry[] {
-  return buildExpiryList(samples, warnDays, now).filter((item) => item.daysLeft <= warnDays);
+  return buildExpiryList(samples, warnDays, now).filter((item) => item.daysLeft <= warnDays && !isSampleClosed(item.sample));
 }
 
 export function todayStr(): string {

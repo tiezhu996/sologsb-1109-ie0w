@@ -8,7 +8,7 @@ import type { RetainSample } from '../types/retain-sample';
 export const DB_NAME = 'gbherbprocess-db';
 
 /** 当前 schema 版本，与 db.version(n) 对应 */
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 class HerbProcessDB extends Dexie {
   herbs!: Table<HerbMaterial, string>;
@@ -46,6 +46,27 @@ class HerbProcessDB extends Dexie {
           .modify((row: ProcessBatch) => {
             if (typeof row.locked !== 'boolean') {
               row.locked = false;
+            }
+          });
+      });
+
+    // v3：留样新增处置登记 disposals（非索引字段，无需改索引）；兜底升级前老留样缺
+    // observeLogs 的情况，保证台账页按原到期日照常打开不白屏。
+    this.version(3)
+      .stores({
+        herbs: 'id, name, origin, part, batchNo, receivedAt',
+        methods: 'id, name, auxiliary, fireLevel',
+        batches: 'id, batchNo, herbId, methodId, degree, startedAt, locked',
+        samples: 'id, sampleNo, batchId, cabinet, retainedAt',
+        meta: 'key',
+      })
+      .upgrade(async (tx) => {
+        await tx
+          .table('samples')
+          .toCollection()
+          .modify((row: RetainSample) => {
+            if (!Array.isArray(row.observeLogs)) {
+              row.observeLogs = [];
             }
           });
       });

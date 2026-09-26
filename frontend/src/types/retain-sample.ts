@@ -15,6 +15,28 @@ export interface ObserveLog {
   note?: string;
 }
 
+/** 留样处置方式 */
+export type DisposalMethod = '转销毁' | '延期观察' | '复检放行';
+
+export const DISPOSAL_METHODS: DisposalMethod[] = ['转销毁', '延期观察', '复检放行'];
+
+/** 留样处置登记（到期后登记，按时间先后追加） */
+export interface DisposalRecord {
+  id: string;
+  /** 处置方式 */
+  method: DisposalMethod;
+  /** 处置人 */
+  operator: string;
+  /** 处置时间 ISO */
+  disposedAt: string;
+  /** 延期观察：新留样期（月），自延期当天重算到期日 */
+  extendMonths?: number;
+  /** 延期观察：原到期日 YYYY-MM-DD（留档） */
+  originalExpireAt?: string;
+  /** 备注 */
+  note?: string;
+}
+
 /** 留样 */
 export interface RetainSample {
   id: string;
@@ -32,6 +54,8 @@ export interface RetainSample {
   retainedAt: string;
   /** 观察记录，按日期追加 */
   observeLogs: ObserveLog[];
+  /** 处置登记记录；升级前的老留样无此字段，按原到期日照常显示 */
+  disposals?: DisposalRecord[];
 }
 
 /** 留样柜位（A/B/C 三柜，每柜 12 位） */

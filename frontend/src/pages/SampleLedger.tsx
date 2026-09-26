@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { App as AntApp, Button, Card, Col, DatePicker, Form, Input, InputNumber, Modal, Popconfirm, Row, Select, Space, Table, Tag, Typography } from 'antd';
+import { Alert, App as AntApp, Button, Card, Col, DatePicker, Form, Input, InputNumber, Modal, Popconfirm, Row, Select, Space, Table, Tag, Typography } from 'antd';
 import type { TableColumnsType } from 'antd';
 import dayjs, { type Dayjs } from 'dayjs';
 import StatBadge from '../components/common/StatBadge';
@@ -8,8 +8,8 @@ import EmptyPanel from '../components/common/EmptyPanel';
 import { useSampleStore } from '../stores/sampleStore';
 import { useBatchStore } from '../stores/batchStore';
 import { useHerbStore } from '../stores/herbStore';
-import { CABINETS, type ObserveLog, type RetainSample, type SampleExpiry } from '../types/retain-sample';
-import { buildExpiryList, formatDate, todayStr } from '../utils/degree';
+import { CABINETS, DISPOSAL_METHODS, type DisposalMethod, type ObserveLog, type RetainSample, type SampleExpiry } from '../types/retain-sample';
+import { buildExpiryList, formatDate, isSampleClosed, lastDisposalOf, todayStr } from '../utils/degree';
 
 const { Title, Paragraph, Text } = Typography;
 
@@ -31,6 +31,14 @@ interface ObserveFormValues {
   note?: string;
 }
 
+interface DisposeFormValues {
+  method: DisposalMethod;
+  operator: string;
+  disposedAt: Dayjs;
+  extendMonths?: number;
+  note?: string;
+}
+
 const STATE_COLOR: Record<SampleExpiry['state'], string> = { 已到期: 'red', 临期: 'orange', 观察中: 'green' };
 
 /** 留样与观察台账：按柜位网格查看并追加观察记录 */
@@ -40,6 +48,7 @@ export default function SampleLedger() {
   const createSample = useSampleStore((s) => s.createSample);
   const removeSample = useSampleStore((s) => s.removeSample);
   const appendObserveLog = useSampleStore((s) => s.appendObserveLog);
+  const disposeSample = useSampleStore((s) => s.disposeSample);
   const batches = useBatchStore((s) => s.batches);
   const herbs = useHerbStore((s) => s.herbs);
 
@@ -48,10 +57,30 @@ export default function SampleLedger() {
   const [form] = Form.useForm<SampleFormValues>();
   const [observeTarget, setObserveTarget] = useState<RetainSample | null>(null);
   const [observeForm] = Form.useForm<ObserveFormValues>();
+  const [disposeTarget, setDisposeTarget] = useState<RetainSample | null>(null);
+  const [disposeForm] = Form.useForm<DisposeFormValues>();
+  const disposeMethod = Form.useWatch('method', disposeForm);
+  const disposeExtendMonths = Form.useWatch('extendMonths', disposeForm);
+  const disposeDisposedAt = Form.useWatch('disposedAt', disposeForm);
 
   const expiryList = useMemo(() => buildExpiryList(samples, 30), [samples]);
-  const dueList = useMemo(() => expiryList.filter((item) => item.daysLeft <= 30), [expiryList]);
-  const expired = useMemo(() => expiryList.filter((item) => item.daysLeft < 0), [expiryList]);
+  // 在架清单：剔除已结案（转销毁/复检放行）的留样，柜位占用与到期提醒都以此为准
+  const activeList = useMemo(() => expiryList.filter((item) => !isSampleClosed(item.sample)), [expiryList]);
+  const dueList = useMemo(() => activeList.filter((item) => item.daysLeft <= 30), [activeList]);
+  const expired = useMemo(() => activeList.filter((item) => item.daysLeft < 0), [activeList]);
+  const closedCount = expiryList.length - activeList.length;
+
+  const disposeTargetExpiry = useMemo(
+    () => expiryList.find((item) => item.sample.id === disposeTarget?.id),
+    [expiryList, disposeTarget],
+  );
+
+  const newExpirePreview = useMemo(() => {
+    if (disposeMethod !== '延期观察' || !disposeDisposedAt || !disposeExtendMonths) {
+      return undefined;
+    }
+    return dayjs(disposeDisposedAt).add(disposeExtendMonths, 'month').format('YYYY-MM-DD');
+  }, [disposeMethod, disposeDisposedAt, disposeExtendMonths]);
 
   const visible = useMemo(
     () => (selectedCabinet ? expiryList.filter((item) => item.sample.cabinet === selectedCabinet) : expiryList),
@@ -74,7 +103,7 @@ export default function SampleLedger() {
       batchId: batch?.id,
       amountG: 300,
       retainMonths: 12,
-      cabinet: CABINETS.find((c) => !expiryList.some((item) => item.sample.cabinet === c)) ?? CABINETS[0],
+      cabinet: CABINETS.find((c) => !activeList.some((item) => item.sample.cabinet === c)) ?? CABINETS[0],
       retainedAt: dayjs(),
     } as unknown as SampleFormValues);
     setOpen(true);
@@ -82,9 +111,11 @@ export default function SampleLedger() {
 
   const submit = async () => {
     const values = await form.validateFields();
-    const occupied = expiryList.some((item) => item.sample.cabinet === values.cabinet);
-    if (occupied) {
-      message.warning(`柜位 ${values.cabinet} 已有留样，仍将并存放置`);
+    // 每个柜位只放一份留样：占用即拦截并提示占用留样编号
+    const occupant = samples.find((s) => s.cabinet === values.cabinet && !isSampleClosed(s));
+    if (occupant) {
+      message.error(`柜位 ${values.cabinet} 已被留样 ${occupant.sampleNo} 占用，一个柜位只放一份留样，请更换柜位`);
+      return;
     }
     await createSample({
       sampleNo: values.sampleNo,
@@ -122,6 +153,32 @@ export default function SampleLedger() {
     message.success('观察记录已按日期追加');
   };
 
+  const openDispose = (record: RetainSample) => {
+    setDisposeTarget(record);
+    disposeForm.resetFields();
+    disposeForm.setFieldsValue({ method: '转销毁', operator: '赵敏', disposedAt: dayjs() } as unknown as DisposeFormValues);
+  };
+
+  const submitDispose = async () => {
+    if (!disposeTarget) return;
+    const values = await disposeForm.validateFields();
+    const { sampleNo, cabinet } = disposeTarget;
+    await disposeSample(disposeTarget.id, {
+      method: values.method,
+      operator: values.operator,
+      disposedAt: values.disposedAt.toISOString(),
+      extendMonths: values.method === '延期观察' ? values.extendMonths : undefined,
+      note: values.note,
+    });
+    if (values.method === '延期观察') {
+      const newExpire = dayjs(values.disposedAt).add(values.extendMonths ?? 0, 'month').format('YYYY-MM-DD');
+      message.success(`已登记延期观察，新到期日 ${newExpire}，原到期日已留档`);
+    } else {
+      message.success(`已登记${values.method}，留样 ${sampleNo} 撤下到期提醒，柜位 ${cabinet} 已释放`);
+    }
+    setDisposeTarget(null);
+  };
+
   const columns: TableColumnsType<SampleExpiry> = [
     { title: '留样编号', width: 170, render: (_, row) => <Text strong>{row.sample.sampleNo}</Text> },
     { title: '关联批次', width: 260, render: (_, row) => batchLabel(row.sample.batchId) },
@@ -134,30 +191,72 @@ export default function SampleLedger() {
       title: '剩余天数',
       width: 110,
       align: 'right',
-      render: (_, row) => (
-        <Text type={row.daysLeft < 0 ? 'danger' : row.daysLeft <= 30 ? 'warning' : undefined}>
-          {row.daysLeft < 0 ? `过期 ${Math.abs(row.daysLeft)} 天` : `${row.daysLeft} 天`}
-        </Text>
-      ),
+      render: (_, row) =>
+        isSampleClosed(row.sample) ? (
+          <Text type="secondary">—</Text>
+        ) : (
+          <Text type={row.daysLeft < 0 ? 'danger' : row.daysLeft <= 30 ? 'warning' : undefined}>
+            {row.daysLeft < 0 ? `过期 ${Math.abs(row.daysLeft)} 天` : `${row.daysLeft} 天`}
+          </Text>
+        ),
     },
-    { title: '状态', width: 90, render: (_, row) => <Tag color={STATE_COLOR[row.state]}>{row.state}</Tag> },
-    { title: '观察记录', width: 100, align: 'right', render: (_, row) => `${row.sample.observeLogs.length} 条` },
+    {
+      title: '状态',
+      width: 110,
+      render: (_, row) => {
+        if (isSampleClosed(row.sample)) {
+          return <Tag>{`已处置·${lastDisposalOf(row.sample)?.method ?? ''}`}</Tag>;
+        }
+        return <Tag color={STATE_COLOR[row.state]}>{row.state}</Tag>;
+      },
+    },
+    { title: '观察记录', width: 100, align: 'right', render: (_, row) => `${(row.sample.observeLogs ?? []).length} 条` },
+    {
+      title: '处置登记',
+      width: 250,
+      render: (_, row) => {
+        const list = row.sample.disposals ?? [];
+        if (list.length === 0) {
+          return <Text type="secondary">未处置</Text>;
+        }
+        return (
+          <Space direction="vertical" size={2}>
+            {list.map((d) => (
+              <Text key={d.id} style={{ fontSize: 12 }}>
+                {`${d.method} · ${d.operator} · ${formatDate(d.disposedAt)}`}
+                {d.method === '延期观察' && d.originalExpireAt ? `（原到期日 ${d.originalExpireAt} 留档）` : ''}
+              </Text>
+            ))}
+          </Space>
+        );
+      },
+    },
     {
       title: '操作',
-      width: 160,
+      width: 220,
       fixed: 'right',
-      render: (_, row) => (
-        <Space size={2}>
-          <Button size="small" type="link" onClick={() => openObserve(row.sample)}>
-            追加观察
-          </Button>
-          <Popconfirm title={`确认删除留样 ${row.sample.sampleNo}？`} onConfirm={() => removeSample(row.sample.id).then(() => message.success('已删除'))}>
-            <Button size="small" type="link" danger>
-              删除
-            </Button>
-          </Popconfirm>
-        </Space>
-      ),
+      render: (_, row) => {
+        const closed = isSampleClosed(row.sample);
+        return (
+          <Space size={2}>
+            {closed ? null : (
+              <Button size="small" type="link" onClick={() => openObserve(row.sample)}>
+                追加观察
+              </Button>
+            )}
+            {closed ? null : (
+              <Button size="small" type="link" onClick={() => openDispose(row.sample)}>
+                处置登记
+              </Button>
+            )}
+            <Popconfirm title={`确认删除留样 ${row.sample.sampleNo}？`} onConfirm={() => removeSample(row.sample.id).then(() => message.success('已删除'))}>
+              <Button size="small" type="link" danger>
+                删除
+              </Button>
+            </Popconfirm>
+          </Space>
+        );
+      },
     },
   ];
 
@@ -175,14 +274,17 @@ export default function SampleLedger() {
       <Title level={3} style={{ marginBottom: 4 }}>
         留样与观察台账
       </Title>
-      <Paragraph type="secondary">按柜位网格查看占用与到期状态，观察记录按日期追加；到期前 30 天进入提醒清单。</Paragraph>
+      <Paragraph type="secondary">
+        每个柜位只放一份留样，占用柜位登记时会被拦截；到期前 30 天进入提醒清单，到期后登记处置（转销毁/延期观察/复检放行），
+        结案即撤下提醒并释放柜位，延期观察自延期当天按新留样期重算到期日。
+      </Paragraph>
 
       <Row gutter={[12, 12]} style={{ marginBottom: 16 }}>
         <Col xs={12} md={6}>
-          <StatBadge label="留样总数" value={samples.length} unit="份" />
+          <StatBadge label="留样总数" value={samples.length} unit="份" hint={closedCount > 0 ? `其中已处置结案 ${closedCount} 份` : undefined} />
         </Col>
         <Col xs={12} md={6}>
-          <StatBadge label="观察中" value={expiryList.length - dueList.length} unit="份" status="success" />
+          <StatBadge label="观察中" value={activeList.length - dueList.length} unit="份" status="success" />
         </Col>
         <Col xs={12} md={6}>
           <StatBadge label="30 天内到期" value={dueList.length - expired.length} unit="份" status="warning" />
@@ -206,13 +308,13 @@ export default function SampleLedger() {
           </Space>
         }
       >
-        <CabinetGrid expiryList={expiryList} selected={selectedCabinet} onSelect={(cabinet) => setSelectedCabinet(cabinet)} />
+        <CabinetGrid expiryList={activeList} selected={selectedCabinet} onSelect={(cabinet) => setSelectedCabinet(cabinet)} />
       </Card>
 
       {visible.length === 0 ? (
         <EmptyPanel description={selectedCabinet ? `柜位 ${selectedCabinet} 暂无留样` : '暂无留样记录'} actionText="登记留样" onAction={openCreate} />
       ) : (
-        <Table rowKey={(row) => row.sample.id} size="small" columns={columns} dataSource={visible} pagination={{ pageSize: 8 }} scroll={{ x: 1400 }} />
+        <Table rowKey={(row) => row.sample.id} size="small" columns={columns} dataSource={visible} pagination={{ pageSize: 8 }} scroll={{ x: 1600 }} />
       )}
 
       <Modal open={open} title="登记留样" onCancel={() => setOpen(false)} onOk={submit} okText="保存" cancelText="取消" width={560}>
@@ -232,10 +334,66 @@ export default function SampleLedger() {
             </Form.Item>
           </Space>
           <Form.Item name="cabinet" label="柜位" rules={[{ required: true, message: '请选择柜位' }]}>
-            <Select showSearch options={CABINETS.map((c) => ({ label: c, value: c }))} />
+            <Select
+              showSearch
+              options={CABINETS.map((c) => {
+                const occupant = samples.find((s) => s.cabinet === c && !isSampleClosed(s));
+                return { label: occupant ? `${c}（占用：${occupant.sampleNo}）` : c, value: c };
+              })}
+            />
           </Form.Item>
           <Form.Item name="retainedAt" label="留样日期" rules={[{ required: true, message: '请选择留样日期' }]}>
             <DatePicker style={{ width: '100%' }} />
+          </Form.Item>
+        </Form>
+      </Modal>
+
+      <Modal
+        open={Boolean(disposeTarget)}
+        title={`处置登记 · ${disposeTarget?.sampleNo ?? ''}`}
+        onCancel={() => setDisposeTarget(null)}
+        onOk={submitDispose}
+        okText="登记处置"
+        cancelText="取消"
+        width={560}
+      >
+        {disposeTarget && disposeTargetExpiry ? (
+          <Alert
+            style={{ marginBottom: 12 }}
+            type={disposeTargetExpiry.daysLeft < 0 ? 'warning' : 'info'}
+            showIcon
+            message={`柜位 ${disposeTarget.cabinet} · 当前到期日 ${disposeTargetExpiry.expireAt}${
+              disposeTargetExpiry.daysLeft < 0 ? `（已过期 ${Math.abs(disposeTargetExpiry.daysLeft)} 天）` : ''
+            }`}
+          />
+        ) : null}
+        <Form form={disposeForm} layout="vertical">
+          <Form.Item name="method" label="处置方式" rules={[{ required: true, message: '请选择处置方式' }]}>
+            <Select options={DISPOSAL_METHODS.map((m) => ({ label: m, value: m }))} />
+          </Form.Item>
+          <Space size={12} style={{ display: 'flex' }} align="start">
+            <Form.Item name="operator" label="处置人" rules={[{ required: true, message: '请输入处置人' }]}>
+              <Input style={{ width: 160 }} maxLength={16} />
+            </Form.Item>
+            <Form.Item name="disposedAt" label="处置时间" rules={[{ required: true, message: '请选择处置时间' }]}>
+              <DatePicker showTime style={{ width: 230 }} />
+            </Form.Item>
+          </Space>
+          {disposeMethod === '延期观察' ? (
+            <>
+              <Form.Item name="extendMonths" label="新留样期(月)" rules={[{ required: true, message: '延期观察需选择新留样期' }]}>
+                <Select style={{ width: 180 }} options={[3, 6, 12, 18, 24, 36].map((m) => ({ label: `${m} 个月`, value: m }))} />
+              </Form.Item>
+              <Alert
+                style={{ marginBottom: 12 }}
+                type="info"
+                showIcon
+                message={`原到期日 ${disposeTargetExpiry?.expireAt ?? '-'} 将留档；新到期日自延期当天起算${newExpirePreview ? `：${newExpirePreview}` : ''}`}
+              />
+            </>
+          ) : null}
+          <Form.Item name="note" label="备注">
+            <Input.TextArea rows={2} maxLength={80} />
           </Form.Item>
         </Form>
       </Modal>

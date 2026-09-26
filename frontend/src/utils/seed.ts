@@ -3,7 +3,7 @@ import { HERB_ORIGINS, type HerbMaterial } from '../types/herb-material';
 import { METHOD_NAMES, type ProcessingMethod } from '../types/processing-method';
 import type { ProcessBatch } from '../types/process-batch';
 import { CABINETS, type RetainSample } from '../types/retain-sample';
-import { judgeDegree, expectedYieldOf } from './degree';
+import { judgeDegree, expectedYieldOf, expireDateOf, formatDate } from './degree';
 
 /** 首次打开时写入的示例台账，便于直接查看各页面效果 */
 export const SEED_HERBS: HerbMaterial[] = [
@@ -97,7 +97,7 @@ function buildSeedSamples(batches: ProcessBatch[]): RetainSample[] {
     observer,
   });
 
-  return batches.slice(0, 6).map((batch, index) => {
+  const samples = batches.slice(0, 6).map((batch, index) => {
     const retainMonths = [6, 12, 18, 24][index % 4];
     const retainedAt = new Date(Date.now() - (index * 37 + 8) * 86_400_000).toISOString();
     return {
@@ -112,8 +112,37 @@ function buildSeedSamples(batches: ProcessBatch[]): RetainSample[] {
         logs(new Date(retainedAt).toISOString().slice(0, 10), '色泽符合标准', '气味正常', '无霉变', '赵敏'),
         logs(new Date(Date.now() - (index * 11 + 2) * 86_400_000).toISOString().slice(0, 10), '色泽略深', '气味正常', '无霉变', '赵敏'),
       ],
-    };
+    } as RetainSample;
   });
+
+  // 示例处置登记：一份延期观察（原到期日留档、自延期当天重算），一份转销毁（结案并释放柜位）
+  const extended = samples[2];
+  // 让这份留样在延期前已经到期，演示「到期 → 延期观察 → 原到期日留档」的完整轨迹
+  extended.retainedAt = new Date(Date.now() - 400 * 86_400_000).toISOString();
+  extended.retainMonths = 12;
+  extended.disposals = [
+    {
+      id: 'disposal-seed-extend',
+      method: '延期观察',
+      operator: '赵敏',
+      disposedAt: new Date(Date.now() - 10 * 86_400_000).toISOString(),
+      extendMonths: 6,
+      originalExpireAt: formatDate(expireDateOf(extended)),
+      note: '色泽略深，延期观察 6 个月',
+    },
+  ];
+  const destroyed = samples[5];
+  destroyed.disposals = [
+    {
+      id: 'disposal-seed-destroy',
+      method: '转销毁',
+      operator: '赵敏',
+      disposedAt: new Date(Date.now() - 3 * 86_400_000).toISOString(),
+      note: '到期转销毁，已登记',
+    },
+  ];
+
+  return samples;
 }
 
 /** 首次打开（表内无数据）时写入示例数据；已有数据则不动 */
