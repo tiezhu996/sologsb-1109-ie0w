@@ -97,10 +97,13 @@ function buildSeedSamples(batches: ProcessBatch[]): RetainSample[] {
     observer,
   });
 
+  const dayMs = 86_400_000;
+
   return batches.slice(0, 6).map((batch, index) => {
-    const retainMonths = [6, 12, 18, 24][index % 4];
-    const retainedAt = new Date(Date.now() - (index * 37 + 8) * 86_400_000).toISOString();
-    return {
+    // 留样期（月）：让示例数据覆盖观察中 / 临期 / 已到期 / 已延期 / 已处置等状态
+    const retainMonths = [6, 12, 3, 3, 3, 6][index];
+    const retainedAt = new Date(Date.now() - (index * 37 + 8) * dayMs).toISOString();
+    const sample: RetainSample = {
       id: `sample-${String(index + 1).padStart(3, '0')}`,
       sampleNo: `LY-${batch.batchNo}`,
       batchId: batch.id,
@@ -110,9 +113,36 @@ function buildSeedSamples(batches: ProcessBatch[]): RetainSample[] {
       retainedAt,
       observeLogs: [
         logs(new Date(retainedAt).toISOString().slice(0, 10), '色泽符合标准', '气味正常', '无霉变', '赵敏'),
-        logs(new Date(Date.now() - (index * 11 + 2) * 86_400_000).toISOString().slice(0, 10), '色泽略深', '气味正常', '无霉变', '赵敏'),
+        logs(new Date(Date.now() - (index * 11 + 2) * dayMs).toISOString().slice(0, 10), '色泽略深', '气味正常', '无霉变', '赵敏'),
       ],
     };
+
+    if (index === 3) {
+      // 到期后登记延期观察：从延期当天按新留样期重算到期日，原到期日留档
+      const originalExpire = new Date(retainedAt);
+      originalExpire.setMonth(originalExpire.getMonth() + retainMonths);
+      sample.disposals = [
+        {
+          id: 'disposal-seed-extend-001',
+          method: '延期观察',
+          operator: '赵敏',
+          disposedAt: new Date(Date.now() - 5 * dayMs).toISOString(),
+          extendedMonths: 6,
+          originalExpireAt: originalExpire.toISOString().slice(0, 10),
+        },
+      ];
+    } else if (index === 4) {
+      // 到期后转销毁：撤下到期提醒并释放柜位
+      sample.disposals = [
+        {
+          id: 'disposal-seed-destroy-001',
+          method: '转销毁',
+          operator: '刘建国',
+          disposedAt: new Date(Date.now() - 10 * dayMs).toISOString(),
+        },
+      ];
+    }
+    return sample;
   });
 }
 

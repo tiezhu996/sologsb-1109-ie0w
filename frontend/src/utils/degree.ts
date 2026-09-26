@@ -1,6 +1,6 @@
 import type { FireLevel, MethodName, ProcessingMethod } from '../types/processing-method';
 import type { DegreeRule, ProcessDegree } from '../types/process-batch';
-import type { RetainSample, SampleExpiry, SampleExpiryState } from '../types/retain-sample';
+import type { DisposalRecord, RetainSample, SampleExpiry, SampleExpiryState } from '../types/retain-sample';
 
 /** 火力对应的常见温度区间提示（℃） */
 export const FIRE_LEVEL_TEMP: Record<FireLevel, [number, number]> = {
@@ -126,10 +126,34 @@ export function suggestedValues(method: ProcessingMethod): { temp: number; durat
 
 const DAY_MS = 86_400_000;
 
-/** 留样到期日：留样日期 + 留样期（月） */
+/** 最近一次处置登记（升级前的老留样没有 disposals 字段，返回 undefined） */
+export function latestDisposal(sample: RetainSample): DisposalRecord | undefined {
+  const list = sample.disposals;
+  return list && list.length > 0 ? list[list.length - 1] : undefined;
+}
+
+/**
+ * 是否已终结处置（转销毁 / 复检放行）。
+ * 终结后撤下到期提醒并释放柜位；延期观察不算终结，留样继续在柜。
+ */
+export function isDisposed(sample: RetainSample): boolean {
+  const method = latestDisposal(sample)?.method;
+  return method === '转销毁' || method === '复检放行';
+}
+
+/**
+ * 留样到期日：
+ * - 默认：留样日期 + 留样期（月）；
+ * - 最近一次处置为延期观察：从处置（延期）当天 + 新留样期（月）重算。
+ */
 export function expireDateOf(sample: RetainSample): Date {
-  const base = new Date(sample.retainedAt);
-  const expire = new Date(base);
+  const latest = latestDisposal(sample);
+  if (latest?.method === '延期观察' && latest.extendedMonths) {
+    const extended = new Date(latest.disposedAt);
+    extended.setMonth(extended.getMonth() + latest.extendedMonths);
+    return extended;
+  }
+  const expire = new Date(sample.retainedAt);
   expire.setMonth(expire.getMonth() + sample.retainMonths);
   return expire;
 }
@@ -157,24 +181,32 @@ export function expiryStateOf(daysLeft: number, warnDays = 30): SampleExpiryStat
   return '观察中';
 }
 
-/** 留样到期派生清单，按剩余天数升序 */
+/** 留样到期派生清单，按剩余天数升序（已终结处置的留样标记为「已处置」） */
 export function buildExpiryList(samples: RetainSample[], warnDays = 30, now: Date = new Date()): SampleExpiry[] {
   return samples
     .map((sample) => {
+      const disposal = latestDisposal(sample);
+      const disposed = disposal?.method === '转销毁' || disposal?.method === '复检放行';
       const daysLeft = daysToExpire(sample, now);
       return {
         sample,
         expireAt: formatDate(expireDateOf(sample)),
         daysLeft,
-        state: expiryStateOf(daysLeft, warnDays),
+        state: disposed ? '已处置' : expiryStateOf(daysLeft, warnDays),
+        disposal,
       };
     })
-    .sort((a, b) => a.daysLeft - b.daysLeft);
+    .sort((a, b) => {
+      // 已处置沉底，其余按剩余天数升序
+      if (a.state === '已处置' && b.state !== '已处置') return 1;
+      if (b.state === '已处置' && a.state !== '已处置') return -1;
+      return a.daysLeft - b.daysLeft;
+    });
 }
 
-/** 到期（含 30 天内临期）清单 */
+/** 到期（含 30 天内临期）提醒清单：已终结处置的留样自动撤下 */
 export function dueSamples(samples: RetainSample[], warnDays = 30, now: Date = new Date()): SampleExpiry[] {
-  return buildExpiryList(samples, warnDays, now).filter((item) => item.daysLeft <= warnDays);
+  return buildExpiryList(samples, warnDays, now).filter((item) => item.state !== '已处置' && item.daysLeft <= warnDays);
 }
 
 export function todayStr(): string {

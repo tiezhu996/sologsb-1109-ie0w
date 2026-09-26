@@ -14,16 +14,20 @@ const STATE_COLOR: Record<SampleExpiry['state'], string> = {
   已到期: '#cf1322',
   临期: '#d48806',
   观察中: '#237804',
+  已处置: '#8c8c8c',
 };
 
 /** 留样柜位网格，显示占用与到期状态，被留样台账消费 */
 export default function CabinetGrid({ expiryList, selected, onSelect }: CabinetGridProps) {
   const byCabinet = new Map<string, SampleExpiry[]>();
-  expiryList.forEach((item) => {
-    const list = byCabinet.get(item.sample.cabinet) ?? [];
-    list.push(item);
-    byCabinet.set(item.sample.cabinet, list);
-  });
+  // 已终结处置（转销毁 / 复检放行）的留样已离柜，不再占用柜位
+  expiryList
+    .filter((item) => item.state !== '已处置')
+    .forEach((item) => {
+      const list = byCabinet.get(item.sample.cabinet) ?? [];
+      list.push(item);
+      byCabinet.set(item.sample.cabinet, list);
+    });
 
   const used = byCabinet.size;
   const total = CABINETS.length;
@@ -49,7 +53,7 @@ export default function CabinetGrid({ expiryList, selected, onSelect }: CabinetG
           const items = byCabinet.get(cabinet) ?? [];
           const worst = items.reduce<SampleExpiry | undefined>((acc, item) => {
             if (!acc) return item;
-            const rank = { 已到期: 3, 临期: 2, 观察中: 1 } as const;
+            const rank = { 已到期: 3, 临期: 2, 观察中: 1, 已处置: 0 } as const;
             return rank[item.state] > rank[acc.state] ? item : acc;
           }, undefined);
           const bg = worst ? STATE_COLOR[worst.state] : '#f0f3f0';
